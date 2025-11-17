@@ -2,28 +2,16 @@ import os
 import tempfile
 import requests
 import pandas as pd
-from fpdf import FPDF
 import streamlit as st
 
-
-# ---------- PDF CLASS ----------
-
-class ProductPDF(FPDF):
-    def __init__(self, title_text="", *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.title_text = title_text
-
-    def header(self):
-        # Heading at the top center
-        if self.title_text:
-            self.set_font("Helvetica", "B", 18)
-            self.cell(0, 10, self.title_text, ln=1, align="C")
-            self.ln(5)
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import mm
 
 
 # ---------- HELPERS ----------
 
-def download_image_to_temp(image_url):
+def download_image_to_temp(image_url: str):
     """
     Download image from URL to a temporary file and return its path.
     If it fails, return None.
@@ -40,73 +28,122 @@ def download_image_to_temp(image_url):
         return None
 
 
-def generate_pdf(products_df, show_price=False, title_text="Catalog"):
+def wrap_text(text: str, max_len: int = 35, max_lines: int = 3):
     """
-    Create a PDF in memory (as bytes) with product image + name (+ price option).
-    Expects normalized columns: product_name, price, image_url.
+    Very simple word-wrapping for drawing text in the PDF.
     """
-    pdf = ProductPDF(title_text=title_text, orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    pdf.set_font("Helvetica", "", 10)
+    words = (text or "").split()
+    lines = []
+    current = ""
+    for w in words:
+        if len(current) + len(w) + (1 if current else 0) <= max_len:
+            current = (current + " " + w) if current else w
+        else:
+            lines.append(current)
+            current = w
+        if len(lines) >= max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    return lines
 
-    # Layout: 3 products per row
+
+def generate_pdf(products_df: pd.DataFrame, show_price: bool = False, title_text: str = "Catalog"):
+    """
+    Create a PDF (as bytes) with product image + name (+ price option).
+    Uses ReportLab instead of fpdf.
+    Expects columns: product_name, price, image_url.
+    """
+    # Create temporary PDF file
+    fd, tmp_pdf_path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+
+    width, height = A4
+    margin = 15 * mm
+    heading_y = height - margin
+
+    c = canvas.Canvas(tmp_pdf_path, pagesize=A4)
+
+    def draw_heading():
+        c.setFont("Helvetica-Bold", 18)
+        c.drawCentredString(width / 2, heading_y, title_text)
+
+    draw_heading()
+    y = heading_y - 20  # start below heading
+
     cols = 3
-    page_width = pdf.w - 2 * pdf.l_margin
-    col_width = page_width / cols
-    img_height = 35
-    block_height = img_height + 20
+    usable_width = width - 2 * margin
+    col_width = usable_width / cols
+    img_height = 35 * mm
+    text_height = 18 * mm
+    block_height = img_height + text_height
 
-    x_start = pdf.l_margin
-    y = pdf.get_y()
     col_index = 0
 
-    products_df = products_df.copy()
-
     for _, row in products_df.iterrows():
-        if col_index == 0 and (pdf.get_y() + block_height > pdf.h - pdf.b_margin):
-            pdf.add_page()
-            y = pdf.get_y()
+        # New page if not enough vertical space
+        if col_index == 0 and (y - block_height < margin):
+            c.showPage()
+            draw_heading()
+            y = heading_y - 20
+            col_index = 0
 
-        x = x_start + col_index * col_width
+        x = margin + col_index * col_width
 
-        # Image
+        # ---- Image ----
         image_url = str(row.get("image_url", "")).strip()
         tmp_img_path = None
         if image_url:
             tmp_img_path = download_image_to_temp(image_url)
 
+        img_bottom = y - img_height
         if tmp_img_path:
-            pdf.image(tmp_img_path, x=x + 2, y=y, w=col_width - 4, h=img_height)
-            os.remove(tmp_img_path)
+            try:
+                c.drawImage(
+                    tmp_img_path,
+                    x + 2,
+                    img_bottom,
+                    width=col_width - 4,
+                    height=img_height,
+                    preserveAspectRatio=True,
+                    anchor="sw",
+                )
+            except Exception:
+                # Draw placeholder rectangle if image fails to render
+                c.rect(x + 2, img_bottom, col_width - 4, img_height)
+            finally:
+                os.remove(tmp_img_path)
         else:
-            # Placeholder rectangle if image not found
-            pdf.rect(x + 2, y, col_width - 4, img_height)
+            # Placeholder rectangle
+            c.rect(x + 2, img_bottom, col_width - 4, img_height)
 
-        # Text: name (+ price)
-        pdf.set_xy(x + 2, y + img_height + 2)
+        # ---- Text: name (+ price) under image ----
         name = str(row.get("product_name", "")).strip()
-
         if show_price:
             price = row.get("price", "")
-            text = f"{name}\n₹{price}"
-        else:
-            text = name
+            if price not in (None, ""):
+                name = f"{name} (₹{price})"
 
-        pdf.multi_cell(col_width - 4, 5, txt=text, align="L")
+        lines = wrap_text(name, max_len=35, max_lines=3)
+        text_y = img_bottom - 4
+        c.setFont("Helvetica", 8)
+        for line in lines:
+            c.drawString(x + 2, text_y, line)
+            text_y -= 9  # line spacing
 
+        # Next column / row
         col_index += 1
         if col_index == cols:
             col_index = 0
-            y += block_height + 5
+            y -= block_height + 5
 
-    # Return as bytes
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        pdf.output(tmp_file.name)
-        tmp_file.flush()
-        tmp_file.seek(0)
-        pdf_bytes = tmp_file.read()
-    os.remove(tmp_file.name)
+    c.save()
+
+    # Read PDF bytes
+    with open(tmp_pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+    os.remove(tmp_pdf_path)
+
     return pdf_bytes
 
 
@@ -119,7 +156,6 @@ def normalize_columns(df_raw: pd.DataFrame) -> pd.DataFrame:
     Image Link   -> image_url
     """
     df = df_raw.copy()
-    # Strip spaces from headers just in case
     df.columns = [c.strip() for c in df.columns]
 
     rename_map = {
@@ -131,7 +167,8 @@ def normalize_columns(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     df = df.rename(columns=rename_map)
 
-    missing = [new for old, new in rename_map.items() if new not in df.columns]
+    required_cols = ["product_name", "price", "product_url", "image_url"]
+    missing = [col for col in required_cols if col not in df.columns]
     if missing:
         st.error(
             "These required columns are missing after mapping: "
@@ -143,7 +180,7 @@ def normalize_columns(df_raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def filter_products(df_norm, selection_mode, input_text):
+def filter_products(df_norm: pd.DataFrame, selection_mode: str, input_text: str) -> pd.DataFrame:
     """
     Filter products based on selection mode and user input.
     selection_mode: 'url' or 'name'
@@ -151,15 +188,14 @@ def filter_products(df_norm, selection_mode, input_text):
     Expects normalized columns: product_name, product_url
     """
     df = df_norm.copy()
-
     lines = [line.strip() for line in input_text.splitlines() if line.strip()]
 
     if not lines:
-        return df.iloc[0:0]  # empty df
+        return df.iloc[0:0]
 
     if selection_mode == "url":
         return df[df["product_url"].isin(lines)]
-    else:  # by name
+    else:
         lower_names = [x.lower() for x in lines]
         return df[df["product_name"].str.lower().isin(lower_names)]
 
