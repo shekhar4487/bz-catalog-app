@@ -1,5 +1,6 @@
 streamlit
 fpdf2
+fpdf
 pandas
 requests
 openpyxl
