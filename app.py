@@ -11,10 +11,10 @@ from reportlab.lib import colors
 from PIL import Image
 
 
-# ---------- HELPERS ----------
+# ---------- IMAGE + TEXT HELPERS ----------
 
 def download_image_to_temp(image_url: str):
-    """Download image locally."""
+    """Download image to a temporary file and return its path."""
     try:
         resp = requests.get(image_url, timeout=10)
         resp.raise_for_status()
@@ -28,7 +28,7 @@ def download_image_to_temp(image_url: str):
 
 
 def get_scaled_image_size(path: str, max_w: float, max_h: float):
-    """Scale image perfectly inside given box preserving ratio."""
+    """Scale image to fit inside max_w x max_h, keeping aspect ratio."""
     try:
         with Image.open(path) as img:
             w, h = img.size
@@ -41,7 +41,7 @@ def get_scaled_image_size(path: str, max_w: float, max_h: float):
 
 
 def wrap_text(text: str, max_len: int, max_lines: int):
-    """Soft wrap for product names."""
+    """Simple word-wrapping for product names."""
     if not text:
         return []
     words = text.split()
@@ -64,6 +64,11 @@ def wrap_text(text: str, max_len: int, max_lines: int):
 # ---------- PDF GENERATION ----------
 
 def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
+    """
+    Create a PDF (as bytes) with product image + name (+ price).
+    Clean card layout, centered image & text, price bar at bottom.
+    Expects columns: product_name, price, image_url.
+    """
     fd, tmp_pdf_path = tempfile.mkstemp(suffix=".pdf")
     os.close(fd)
 
@@ -74,6 +79,7 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
 
     def draw_heading():
         c.setFont("Helvetica-Bold", 20)
+        c.setFillColor(colors.black)
         c.drawCentredString(width / 2, height - margin, title_text)
 
     draw_heading()
@@ -84,12 +90,10 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
     usable_width = width - 2 * margin
     col_width = usable_width / cols
 
-    card_h = 85 * mm       # bigger cards → better design
-    image_h = 40 * mm      # fixed height frame
-    image_pad = 5 * mm     # inside padding
-    name_area_h = 18 * mm  # fixed area for product name
-
-    spacer = 6 * mm        # spacing between image → name
+    card_h = 85 * mm       # card height
+    image_h = 40 * mm      # image frame height
+    name_area_h = 18 * mm  # reserved height for product name
+    spacer = 6 * mm        # gap between image and name
 
     col_index = 0
 
@@ -112,7 +116,7 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
 
         card_center_x = card_x + card_w / 2
 
-        # ----- IMAGE FRAME (center aligned) -----
+        # ----- IMAGE FRAME (centered) -----
         img_frame_y = card_y + card_h - image_h - 10
         img_frame_h = image_h
         img_frame_w = card_w - 10
@@ -121,10 +125,10 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
         tmp = download_image_to_temp(image_url)
 
         if tmp:
-            draw_w, draw_h = get_scaled_image_size(tmp, img_frame_w, img_frame_h)
-            img_x = card_center_x - draw_w / 2
-            img_y = img_frame_y + (img_frame_h - draw_h) / 2
             try:
+                draw_w, draw_h = get_scaled_image_size(tmp, img_frame_w, img_frame_h)
+                img_x = card_center_x - draw_w / 2
+                img_y = img_frame_y + (img_frame_h - draw_h) / 2
                 c.drawImage(tmp, img_x, img_y, width=draw_w, height=draw_h)
             finally:
                 os.remove(tmp)
@@ -132,17 +136,16 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
             c.setFillColor(colors.white)
             c.rect(card_x + 5, img_frame_y, img_frame_w, img_frame_h, stroke=0, fill=1)
 
-        # ----- PRODUCT NAME (center aligned, BEAUTIFUL SPACING) -----
+        # ----- PRODUCT NAME (bold, centred, with spacing) -----
         name_y_top = img_frame_y - spacer
-        name_y_bottom = name_y_top - name_area_h
         line_height = 8
+        max_lines = 2  # keep it clean & inside card
 
-        max_lines = 2  # cleanest appearance
         name = str(row.get("product_name", "")).strip()
-
         lines = wrap_text(name, max_len=25, max_lines=max_lines)
 
         c.setFont("Helvetica-Bold", 9)
+        c.setFillColor(colors.black)  # IMPORTANT: ensure black text
 
         text_y = name_y_top - 2
         for line in lines:
@@ -152,7 +155,7 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
         # ----- PRICE BAR -----
         if show_price:
             price = row.get("price", "")
-            if price:
+            if price not in (None, ""):
                 bar_h = 8 * mm
                 bar_y = card_y + 8 * mm
                 bar_w = card_w - 12
@@ -164,9 +167,13 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
 
                 c.setFont("Helvetica-Bold", 9)
                 c.setFillColor(colors.HexColor("#1f3b70"))
-                c.drawCentredString(bar_x + bar_w/2, bar_y + bar_h/2 - 3, f"Price: Rs. {price}")
+                c.drawCentredString(
+                    bar_x + bar_w / 2,
+                    bar_y + bar_h / 2 - 3,
+                    f"Price: Rs. {price}",
+                )
 
-        # next column
+        # Move to next column / row
         col_index += 1
         if col_index == cols:
             col_index = 0
@@ -183,7 +190,14 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
 
 # ---------- DATA PROCESSING ----------
 
-def normalize_columns(df_raw):
+def normalize_columns(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Map your Excel columns to internal names:
+    Product Name -> product_name
+    SP           -> price
+    Product Link -> product_url
+    Image Link   -> image_url
+    """
     df = df_raw.copy()
     df.columns = [c.strip() for c in df.columns]
 
@@ -191,13 +205,20 @@ def normalize_columns(df_raw):
         "Product Name": "product_name",
         "SP": "price",
         "Product Link": "product_url",
-        "Image Link": "image_url"
+        "Image Link": "image_url",
     })
+
+    required = ["product_name", "price", "product_url", "image_url"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(f"Missing required columns after mapping: {', '.join(missing)}")
+        return df.iloc[0:0]
 
     return df
 
 
-def filter_products(df, mode, text):
+def filter_products(df: pd.DataFrame, mode: str, text: str) -> pd.DataFrame:
+    """Filter products by URL or Name based on user input."""
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if not lines:
         return df.iloc[0:0]
@@ -205,7 +226,8 @@ def filter_products(df, mode, text):
     if mode == "url":
         return df[df["product_url"].isin(lines)]
     else:
-        return df[df["product_name"].str.lower().isin([l.lower() for l in lines])]
+        lower_lines = [l.lower() for l in lines]
+        return df[df["product_name"].str.lower().isin(lower_lines)]
 
 
 # ---------- STREAMLIT UI ----------
@@ -213,24 +235,85 @@ def filter_products(df, mode, text):
 st.set_page_config(page_title="Behtar Zindagi Catalog Generator", layout="wide")
 st.title("📄 Behtar Zindagi Catalog Generator")
 
+st.markdown(
+    """
+This app creates **two PDFs**:
+
+1. **Name + Image**  
+2. **Name + Image + Price (using SP)**  
+
+Your Excel should contain at least these columns:
+
+- `Product Name`
+- `SP` (selling price)
+- `Product Link`
+- `Image Link`
+"""
+)
+
 uploaded = st.file_uploader("Upload master Excel", type=["xlsx", "xls"])
 
+df_master = None
 if uploaded:
-    df_raw = pd.read_excel(uploaded)
-    df = normalize_columns(df_raw)
+    try:
+        df_raw = pd.read_excel(uploaded)
+        df_master = normalize_columns(df_raw)
+        if not df_master.empty:
+            st.success(f"Loaded {len(df_master)} products.")
+            st.write("Columns:", list(df_master.columns))
+        else:
+            df_master = None
+    except Exception as e:
+        st.error(f"Error reading Excel: {e}")
+        df_master = None
 
-    st.success("Excel loaded.")
+if df_master is None:
+    st.stop()
 
-    mode = st.radio("Select products by:", ["URL", "Name"])
-    box_text = st.text_area("Paste URLs or Names (one per line)")
-    heading = st.text_input("Heading for PDF:")
+st.header("Select Products")
 
-    if st.button("Generate PDFs"):
-        selected = filter_products(df, "url" if mode == "URL" else "name", box_text)
+mode_choice = st.radio(
+    "Select products by:",
+    ["By Product URL (Product Link)", "By Product Name"],
+)
 
-        with st.spinner("Generating..."):
-            pdf1 = generate_pdf(selected, show_price=False, title_text=heading)
-            pdf2 = generate_pdf(selected, show_price=True, title_text=heading)
+if mode_choice == "By Product URL (Product Link)":
+    mode_key = "url"
+    placeholder = "Paste one Product Link (URL) per line..."
+else:
+    mode_key = "name"
+    placeholder = "Paste one Product Name per line (exact / close match)..."
 
-        st.download_button("Download PDF (Name + Image)", pdf1, "catalog_without_price.pdf")
-        st.download_button("Download PDF (Name + Image + Price)", pdf2, "catalog_with_price.pdf")
+input_text = st.text_area("Products to include", height=150, placeholder=placeholder)
+
+heading = st.text_input("Heading for PDF (e.g. 'Vetcare for Cattle'):")
+
+if st.button("Generate PDFs"):
+    if not heading.strip():
+        st.error("Please enter a heading.")
+    elif not input_text.strip():
+        st.error("Please paste at least one product.")
+    else:
+        selected = filter_products(df_master, mode_key, input_text)
+        if selected.empty:
+            st.error("No matching products found. Check your names/URLs.")
+        else:
+            st.success(f"Found {len(selected)} matching products.")
+
+            with st.spinner("Creating PDFs..."):
+                pdf_no_price = generate_pdf(selected, show_price=False, title_text=heading)
+                pdf_with_price = generate_pdf(selected, show_price=True, title_text=heading)
+
+            st.subheader("Download")
+            st.download_button(
+                "⬇️ Download PDF (Name + Image)",
+                data=pdf_no_price,
+                file_name="catalog_without_price.pdf",
+                mime="application/pdf",
+            )
+            st.download_button(
+                "⬇️ Download PDF (Name + Image + Price)",
+                data=pdf_with_price,
+                file_name="catalog_with_price.pdf",
+                mime="application/pdf",
+            )
