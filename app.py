@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 import streamlit as st
 
+from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
@@ -14,14 +15,26 @@ from PIL import Image
 # ---------- IMAGE + TEXT HELPERS ----------
 
 def download_image_to_temp(image_url: str):
-    """Download image to a temporary file and return its path."""
+    """
+    Download image, resize & compress it (to keep PDF small),
+    save to a temporary JPEG file and return its path.
+    """
     try:
         resp = requests.get(image_url, timeout=10)
         resp.raise_for_status()
+
+        # Open image from bytes
+        img = Image.open(BytesIO(resp.content))
+
+        # Convert to RGB and downscale to max 500x500 (good for A4 catalog)
+        img = img.convert("RGB")
+        img.thumbnail((500, 500))
+
+        # Save compressed JPEG to temp file
         fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
         os.close(fd)
-        with open(tmp_path, "wb") as f:
-            f.write(resp.content)
+        img.save(tmp_path, format="JPEG", quality=70, optimize=True)
+
         return tmp_path
     except Exception:
         return None
@@ -65,9 +78,11 @@ def wrap_text(text: str, max_len: int, max_lines: int):
 
 def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
     """
-    Create a PDF (as bytes) with product image + name (+ price).
-    Clean card layout, centered image & text, price bar at bottom.
-    Expects columns: product_name, price, image_url.
+    Create a PDF (as bytes) with product:
+    - Image
+    - Name (bold, centered, spaced)
+    - Optional Price bar
+    - "Product Details" button linking to product_url
     """
     fd, tmp_pdf_path = tempfile.mkstemp(suffix=".pdf")
     os.close(fd)
@@ -90,9 +105,8 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
     usable_width = width - 2 * margin
     col_width = usable_width / cols
 
-    card_h = 85 * mm       # card height
+    card_h = 90 * mm       # card height
     image_h = 40 * mm      # image frame height
-    name_area_h = 18 * mm  # reserved height for product name
     spacer = 6 * mm        # gap between image and name
 
     col_index = 0
@@ -117,24 +131,24 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
         card_center_x = card_x + card_w / 2
 
         # ----- IMAGE FRAME (centered) -----
-        img_frame_y = card_y + card_h - image_h - 10
+        img_frame_y = card_y + card_h - image_h - 12
         img_frame_h = image_h
-        img_frame_w = card_w - 10
+        img_frame_w = card_w - 12
 
         image_url = str(row.get("image_url", "")).strip()
-        tmp = download_image_to_temp(image_url)
+        tmp_img_path = download_image_to_temp(image_url) if image_url else None
 
-        if tmp:
+        if tmp_img_path:
             try:
-                draw_w, draw_h = get_scaled_image_size(tmp, img_frame_w, img_frame_h)
+                draw_w, draw_h = get_scaled_image_size(tmp_img_path, img_frame_w, img_frame_h)
                 img_x = card_center_x - draw_w / 2
                 img_y = img_frame_y + (img_frame_h - draw_h) / 2
-                c.drawImage(tmp, img_x, img_y, width=draw_w, height=draw_h)
+                c.drawImage(tmp_img_path, img_x, img_y, width=draw_w, height=draw_h)
             finally:
-                os.remove(tmp)
+                os.remove(tmp_img_path)
         else:
             c.setFillColor(colors.white)
-            c.rect(card_x + 5, img_frame_y, img_frame_w, img_frame_h, stroke=0, fill=1)
+            c.rect(card_x + 6, img_frame_y, img_frame_w, img_frame_h, stroke=0, fill=1)
 
         # ----- PRODUCT NAME (bold, centred, with spacing) -----
         name_y_top = img_frame_y - spacer
@@ -145,21 +159,52 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool, title_text: str):
         lines = wrap_text(name, max_len=25, max_lines=max_lines)
 
         c.setFont("Helvetica-Bold", 9)
-        c.setFillColor(colors.black)  # IMPORTANT: ensure black text
+        c.setFillColor(colors.black)
 
         text_y = name_y_top - 2
         for line in lines:
             c.drawCentredString(card_center_x, text_y, line)
             text_y -= line_height
 
-        # ----- PRICE BAR -----
+        # ----- BOTTOM ACTION AREA (price + Product Details button) -----
+        # Layout:
+        # [ Price bar ]  (only in price PDF, a bit above)
+        # [ Product Details button ]  (always present, clickable)
+        button_h = 7 * mm
+        button_y = card_y + 7 * mm
+        button_w = card_w - 20
+        button_x = card_x + (card_w - button_w) / 2
+
+        # Draw "Product Details" button
+        c.setFillColor(colors.HexColor("#f0f7ff"))
+        c.setStrokeColor(colors.HexColor("#2f80ed"))
+        c.roundRect(button_x, button_y, button_w, button_h, 4, stroke=1, fill=1)
+
+        c.setFont("Helvetica-Bold", 8)
+        c.setFillColor(colors.HexColor("#1f3b70"))
+        c.drawCentredString(
+            button_x + button_w / 2,
+            button_y + button_h / 2 - 3,
+            "Product Details",
+        )
+
+        # Make the button clickable (link to product_url)
+        product_url = str(row.get("product_url", "")).strip()
+        if product_url:
+            c.linkURL(
+                product_url,
+                (button_x, button_y, button_x + button_w, button_y + button_h),
+                relative=0,
+            )
+
+        # Price bar (only in price PDF)
         if show_price:
             price = row.get("price", "")
             if price not in (None, ""):
                 bar_h = 8 * mm
-                bar_y = card_y + 8 * mm
-                bar_w = card_w - 12
-                bar_x = card_x + 6
+                bar_y = button_y + button_h + 2 * mm
+                bar_w = card_w - 16
+                bar_x = card_x + (card_w - bar_w) / 2
 
                 c.setFillColor(colors.HexColor("#e2f3ff"))
                 c.setStrokeColor(colors.HexColor("#4a90e2"))
@@ -239,15 +284,15 @@ st.markdown(
     """
 This app creates **two PDFs**:
 
-1. **Name + Image**  
-2. **Name + Image + Price (using SP)**  
+1. **Name + Image + Product Details button**  
+2. **Name + Image + Price + Product Details button**  
 
 Your Excel should contain at least these columns:
 
 - `Product Name`
 - `SP` (selling price)
-- `Product Link`
-- `Image Link`
+- `Product Link` (buy URL)
+- `Image Link` (product image URL)
 """
 )
 
@@ -306,13 +351,13 @@ if st.button("Generate PDFs"):
 
             st.subheader("Download")
             st.download_button(
-                "⬇️ Download PDF (Name + Image)",
+                "⬇️ Download PDF (Name + Image + Details button)",
                 data=pdf_no_price,
                 file_name="catalog_without_price.pdf",
                 mime="application/pdf",
             )
             st.download_button(
-                "⬇️ Download PDF (Name + Image + Price)",
+                "⬇️ Download PDF (Name + Image + Price + Details button)",
                 data=pdf_with_price,
                 file_name="catalog_with_price.pdf",
                 mime="application/pdf",
