@@ -114,6 +114,10 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool = False, title_text
         tmp_img_path = None
         img_bottom = inner_y_top - img_height
 
+        # image box width; we keep equal left/right padding so it is centered
+        img_box_w = card_w - 12
+        img_x = card_x + (card_w - img_box_w) / 2  # center inside card
+
         if image_url:
             tmp_img_path = download_image_to_temp(image_url)
 
@@ -121,51 +125,61 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool = False, title_text
             try:
                 c.drawImage(
                     tmp_img_path,
-                    inner_x,
+                    img_x,
                     img_bottom,
-                    width=card_w - 12,
+                    width=img_box_w,
                     height=img_height,
                     preserveAspectRatio=True,
                     anchor="sw",
                 )
             except Exception:
                 c.setFillColor(colors.white)
-                c.rect(inner_x, img_bottom, card_w - 12, img_height, stroke=0, fill=1)
+                c.rect(img_x, img_bottom, img_box_w, img_height, stroke=0, fill=1)
             finally:
                 os.remove(tmp_img_path)
         else:
             # Placeholder if image missing
             c.setFillColor(colors.white)
-            c.rect(inner_x, img_bottom, card_w - 12, img_height, stroke=0, fill=1)
+            c.rect(img_x, img_bottom, img_box_w, img_height, stroke=0, fill=1)
 
-        # ----- Product name text -----
+        # ----- Product name text (bold & centred) -----
         name = str(row.get("product_name", "")).strip()
         lines = wrap_text(name, max_len=32, max_lines=3)
 
-        text_y = img_bottom - 6
+        # centre horizontally in card
+        centre_x = card_x + card_w / 2
+        text_y_start = img_bottom - 6
         c.setFillColor(colors.black)
-        c.setFont("Helvetica", 8)
+        c.setFont("Helvetica-Bold", 9)  # bold & slightly bigger
 
+        text_y = text_y_start
         for line in lines:
-            c.drawString(inner_x, text_y, line)
+            c.drawCentredString(centre_x, text_y, line)
             text_y -= 9  # line spacing
 
-        # ----- Highlighted price tag (bottom of card) -----
+        # ----- Highlighted price tag (bottom of card, centred) -----
         if show_price:
             price = row.get("price", "")
             if price not in (None, ""):
-                price_label = f"Price: ₹{price}"
+                # Rupee symbol before amount
+                price_label = f"₹ {price}"
 
                 price_box_h = 8 * mm
                 price_box_y = card_y + 6
+                price_box_w = card_w - 12
+                price_box_x = card_x + (card_w - price_box_w) / 2
 
                 c.setFillColor(colors.HexColor("#e2f3ff"))  # light blue tag
                 c.setStrokeColor(colors.HexColor("#4a90e2"))
-                c.roundRect(inner_x, price_box_y, card_w - 12, price_box_h, 3, stroke=1, fill=1)
+                c.roundRect(price_box_x, price_box_y, price_box_w, price_box_h, 3, stroke=1, fill=1)
 
                 c.setFillColor(colors.HexColor("#1f3b70"))
                 c.setFont("Helvetica-Bold", 9)
-                c.drawCentredString(inner_x + (card_w - 12) / 2, price_box_y + 3, price_label)
+                c.drawCentredString(
+                    price_box_x + price_box_w / 2,
+                    price_box_y + 3,
+                    price_label,
+                )
 
         # Next column / row
         col_index += 1
@@ -249,7 +263,7 @@ This app creates **two PDFs** from your product list:
 1. **Name + Image**  
 2. **Name + Image + Price (using SP)**  
 
-**Your Excel should have these columns** (as you shared):
+**Your Excel should have these columns**:
 
 - `Product Name`
 - `Unit`
@@ -267,8 +281,6 @@ This app creates **two PDFs** from your product list:
 - `Image Link`  *(used for product image)*
 - `Video Link`
 - `Product Link`  *(used for URL selection)*
-
-You don't need to change the Excel headers.
 """
 )
 
@@ -325,7 +337,7 @@ else:
 
     st.header("3️⃣ Heading & Generate")
 
-    heading = st.text_input("Heading for this PDF (e.g. 'Milk Processing Machines'):")
+    heading = st.text_input("Heading for this PDF (e.g. 'Vetcare Products for Cattle'):")
 
     if st.button("Generate PDFs", type="primary"):
         if not heading.strip():
