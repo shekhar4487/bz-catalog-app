@@ -7,6 +7,7 @@ import streamlit as st
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
+from reportlab.lib import colors
 
 
 # ---------- HELPERS ----------
@@ -30,13 +31,16 @@ def download_image_to_temp(image_url: str):
 
 def wrap_text(text: str, max_len: int = 35, max_lines: int = 3):
     """
-    Very simple word-wrapping for drawing text in the PDF.
+    Simple word-wrapping for product name text.
     """
-    words = (text or "").split()
+    if not text:
+        return []
+    words = text.split()
     lines = []
     current = ""
     for w in words:
-        if len(current) + len(w) + (1 if current else 0) <= max_len:
+        extra = (1 if current else 0) + len(w)
+        if len(current) + extra <= max_len:
             current = (current + " " + w) if current else w
         else:
             lines.append(current)
@@ -51,7 +55,7 @@ def wrap_text(text: str, max_len: int = 35, max_lines: int = 3):
 def generate_pdf(products_df: pd.DataFrame, show_price: bool = False, title_text: str = "Catalog"):
     """
     Create a PDF (as bytes) with product image + name (+ price option).
-    Uses ReportLab instead of fpdf.
+    Uses a card layout with borders and a highlighted price tag.
     Expects columns: product_name, price, image_url.
     """
     # Create temporary PDF file
@@ -66,76 +70,108 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool = False, title_text
 
     def draw_heading():
         c.setFont("Helvetica-Bold", 18)
+        c.setFillColor(colors.black)
         c.drawCentredString(width / 2, heading_y, title_text)
 
     draw_heading()
-    y = heading_y - 20  # start below heading
+    y = heading_y - 25  # start below heading
 
+    # Layout: 3 cards per row
     cols = 3
     usable_width = width - 2 * margin
     col_width = usable_width / cols
     img_height = 35 * mm
-    text_height = 18 * mm
-    block_height = img_height + text_height
+    card_height = img_height + 25 * mm  # image + text + price area
 
     col_index = 0
 
     for _, row in products_df.iterrows():
-        # New page if not enough vertical space
-        if col_index == 0 and (y - block_height < margin):
+        # New page if not enough vertical space for a full card
+        if col_index == 0 and (y - card_height < margin):
             c.showPage()
             draw_heading()
-            y = heading_y - 20
+            y = heading_y - 25
             col_index = 0
 
         x = margin + col_index * col_width
 
-        # ---- Image ----
+        # ----- Card border -----
+        card_x = x + 4
+        card_y = y - card_height
+        card_w = col_width - 8
+        card_h = card_height
+
+        c.setStrokeColor(colors.lightgrey)
+        c.setFillColor(colors.whitesmoke)
+        c.roundRect(card_x, card_y, card_w, card_h, 6, stroke=1, fill=1)
+
+        # Inner padding
+        inner_x = card_x + 6
+        inner_y_top = y - 8
+
+        # ----- Image -----
         image_url = str(row.get("image_url", "")).strip()
         tmp_img_path = None
+        img_bottom = inner_y_top - img_height
+
         if image_url:
             tmp_img_path = download_image_to_temp(image_url)
 
-        img_bottom = y - img_height
         if tmp_img_path:
             try:
                 c.drawImage(
                     tmp_img_path,
-                    x + 2,
+                    inner_x,
                     img_bottom,
-                    width=col_width - 4,
+                    width=card_w - 12,
                     height=img_height,
                     preserveAspectRatio=True,
                     anchor="sw",
                 )
             except Exception:
-                # Draw placeholder rectangle if image fails to render
-                c.rect(x + 2, img_bottom, col_width - 4, img_height)
+                c.setFillColor(colors.white)
+                c.rect(inner_x, img_bottom, card_w - 12, img_height, stroke=0, fill=1)
             finally:
                 os.remove(tmp_img_path)
         else:
-            # Placeholder rectangle
-            c.rect(x + 2, img_bottom, col_width - 4, img_height)
+            # Placeholder if image missing
+            c.setFillColor(colors.white)
+            c.rect(inner_x, img_bottom, card_w - 12, img_height, stroke=0, fill=1)
 
-        # ---- Text: name (+ price) under image ----
+        # ----- Product name text -----
         name = str(row.get("product_name", "")).strip()
+        lines = wrap_text(name, max_len=32, max_lines=3)
+
+        text_y = img_bottom - 6
+        c.setFillColor(colors.black)
+        c.setFont("Helvetica", 8)
+
+        for line in lines:
+            c.drawString(inner_x, text_y, line)
+            text_y -= 9  # line spacing
+
+        # ----- Highlighted price tag (bottom of card) -----
         if show_price:
             price = row.get("price", "")
             if price not in (None, ""):
-                name = f"{name} (₹{price})"
+                price_label = f"Price: ₹{price}"
 
-        lines = wrap_text(name, max_len=35, max_lines=3)
-        text_y = img_bottom - 4
-        c.setFont("Helvetica", 8)
-        for line in lines:
-            c.drawString(x + 2, text_y, line)
-            text_y -= 9  # line spacing
+                price_box_h = 8 * mm
+                price_box_y = card_y + 6
+
+                c.setFillColor(colors.HexColor("#e2f3ff"))  # light blue tag
+                c.setStrokeColor(colors.HexColor("#4a90e2"))
+                c.roundRect(inner_x, price_box_y, card_w - 12, price_box_h, 3, stroke=1, fill=1)
+
+                c.setFillColor(colors.HexColor("#1f3b70"))
+                c.setFont("Helvetica-Bold", 9)
+                c.drawCentredString(inner_x + (card_w - 12) / 2, price_box_y + 3, price_label)
 
         # Next column / row
         col_index += 1
         if col_index == cols:
             col_index = 0
-            y -= block_height + 5
+            y -= card_height + 10
 
     c.save()
 
@@ -208,7 +244,7 @@ st.title("📄 Behtar Zindagi PDF Catalog Generator")
 
 st.markdown(
     """
-This app will create **two PDFs** from your product list:
+This app creates **two PDFs** from your product list:
 
 1. **Name + Image**  
 2. **Name + Image + Price (using SP)**  
