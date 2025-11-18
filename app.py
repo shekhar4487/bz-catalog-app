@@ -29,9 +29,9 @@ def download_image_to_temp(image_url: str):
         return None
 
 
-def wrap_text(text: str, max_len: int = 35, max_lines: int = 3):
+def wrap_text(text: str, max_len: int, max_lines: int):
     """
-    Simple word-wrapping for product name text.
+    Simple character-based word wrapping with a maximum number of lines.
     """
     if not text:
         return []
@@ -55,7 +55,7 @@ def wrap_text(text: str, max_len: int = 35, max_lines: int = 3):
 def generate_pdf(products_df: pd.DataFrame, show_price: bool = False, title_text: str = "Catalog"):
     """
     Create a PDF (as bytes) with product image + name (+ price option).
-    Uses a card layout with borders and a highlighted price tag.
+    Clean card layout, image + text centered, price highlighted.
     Expects columns: product_name, price, image_url.
     """
     # Create temporary PDF file
@@ -74,49 +74,61 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool = False, title_text
         c.drawCentredString(width / 2, heading_y, title_text)
 
     draw_heading()
-    y = heading_y - 25  # start below heading
+    y_top_row = heading_y - 25  # top of first row of cards
 
     # Layout: 3 cards per row
     cols = 3
     usable_width = width - 2 * margin
     col_width = usable_width / cols
-    img_height = 35 * mm
-    card_height = img_height + 25 * mm  # image + text + price area
+
+    card_height = 70 * mm  # taller cards to avoid overflow
+    img_height = 32 * mm   # slightly smaller to leave room for text
 
     col_index = 0
 
     for _, row in products_df.iterrows():
-        # New page if not enough vertical space for a full card
-        if col_index == 0 and (y - card_height < margin):
+        # Start a new page if not enough vertical space for a whole row
+        if col_index == 0 and (y_top_row - card_height < margin):
             c.showPage()
             draw_heading()
-            y = heading_y - 25
+            y_top_row = heading_y - 25
             col_index = 0
 
-        x = margin + col_index * col_width
-
-        # ----- Card border -----
-        card_x = x + 4
-        card_y = y - card_height
-        card_w = col_width - 8
+        card_x = margin + col_index * col_width
+        card_y = y_top_row - card_height
+        card_w = col_width - 6
         card_h = card_height
 
+        # ----- Card background + border -----
         c.setStrokeColor(colors.lightgrey)
         c.setFillColor(colors.whitesmoke)
-        c.roundRect(card_x, card_y, card_w, card_h, 6, stroke=1, fill=1)
+        c.roundRect(card_x, card_y, card_w, card_h, 8, stroke=1, fill=1)
 
-        # Inner padding
-        inner_x = card_x + 6
-        inner_y_top = y - 8
+        # Inner margins
+        inner_margin_x = 6
+        inner_margin_top = 8
+        inner_margin_bottom = 8
 
-        # ----- Image -----
+        # ---- Bottom price bar area ----
+        price_bar_height = 8 * mm
+        price_bar_y = card_y + inner_margin_bottom
+
+        # ---- Image + name area vertical bounds ----
+        content_top = card_y + card_h - inner_margin_top
+        content_bottom = price_bar_y + price_bar_height + 4
+        content_height = content_top - content_bottom
+
+        # ----- Image placement (centered horizontally) -----
+        img_box_h = min(img_height, content_height * 0.6)
+        img_box_w = card_w - 2 * inner_margin_x
+        card_center_x = card_x + card_w / 2
+
+        # Vertically center image within the upper 60% of content
+        img_y = content_bottom + (content_height * 0.6 - img_box_h) / 2 + content_height * 0.4
+        img_x = card_center_x - img_box_w / 2
+
         image_url = str(row.get("image_url", "")).strip()
         tmp_img_path = None
-        img_bottom = inner_y_top - img_height
-
-        # image box width; we keep equal left/right padding so it is centered
-        img_box_w = card_w - 12
-        img_x = card_x + (card_w - img_box_w) / 2  # center inside card
 
         if image_url:
             tmp_img_path = download_image_to_temp(image_url)
@@ -126,66 +138,67 @@ def generate_pdf(products_df: pd.DataFrame, show_price: bool = False, title_text
                 c.drawImage(
                     tmp_img_path,
                     img_x,
-                    img_bottom,
+                    img_y,
                     width=img_box_w,
-                    height=img_height,
+                    height=img_box_h,
                     preserveAspectRatio=True,
                     anchor="sw",
                 )
             except Exception:
                 c.setFillColor(colors.white)
-                c.rect(img_x, img_bottom, img_box_w, img_height, stroke=0, fill=1)
+                c.rect(img_x, img_y, img_box_w, img_box_h, stroke=0, fill=1)
             finally:
                 os.remove(tmp_img_path)
         else:
-            # Placeholder if image missing
+            # Placeholder if no image
             c.setFillColor(colors.white)
-            c.rect(img_x, img_bottom, img_box_w, img_height, stroke=0, fill=1)
+            c.rect(img_x, img_y, img_box_w, img_box_h, stroke=0, fill=1)
 
-        # ----- Product name text (bold & centred) -----
+        # ----- Product name (bold & centred) -----
         name = str(row.get("product_name", "")).strip()
-        lines = wrap_text(name, max_len=32, max_lines=3)
 
-        # centre horizontally in card
-        centre_x = card_x + card_w / 2
-        text_y_start = img_bottom - 6
+        text_top = img_y - 4
+        text_bottom = content_bottom
+        available_text_h = text_top - text_bottom
+        line_height = 9
+        max_lines = max(1, int(available_text_h // line_height))
+        max_lines = min(max_lines, 3)  # hard cap
+
+        lines = wrap_text(name, max_len=30, max_lines=max_lines)
+
         c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 9)  # bold & slightly bigger
-
-        text_y = text_y_start
+        c.setFont("Helvetica-Bold", 9)
+        text_y = text_top
         for line in lines:
-            c.drawCentredString(centre_x, text_y, line)
-            text_y -= 9  # line spacing
+            c.drawCentredString(card_center_x, text_y, line)
+            text_y -= line_height
 
-        # ----- Highlighted price tag (bottom of card, centred) -----
+        # ----- Price bar (₹ amount, centred) -----
         if show_price:
             price = row.get("price", "")
             if price not in (None, ""):
-                # Rupee symbol before amount
-                price_label = f"₹ {price}"
+                price_label = f"₹ {price}"  # rupee symbol before amount
 
-                price_box_h = 8 * mm
-                price_box_y = card_y + 6
-                price_box_w = card_w - 12
-                price_box_x = card_x + (card_w - price_box_w) / 2
+                price_bar_w = card_w - 2 * inner_margin_x
+                price_bar_x = card_x + (card_w - price_bar_w) / 2
 
-                c.setFillColor(colors.HexColor("#e2f3ff"))  # light blue tag
+                c.setFillColor(colors.HexColor("#e2f3ff"))  # light blue
                 c.setStrokeColor(colors.HexColor("#4a90e2"))
-                c.roundRect(price_box_x, price_box_y, price_box_w, price_box_h, 3, stroke=1, fill=1)
+                c.roundRect(price_bar_x, price_bar_y, price_bar_w, price_bar_height, 3, stroke=1, fill=1)
 
                 c.setFillColor(colors.HexColor("#1f3b70"))
                 c.setFont("Helvetica-Bold", 9)
                 c.drawCentredString(
-                    price_box_x + price_box_w / 2,
-                    price_box_y + 3,
+                    price_bar_x + price_bar_w / 2,
+                    price_bar_y + price_bar_height / 2 - 3,
                     price_label,
                 )
 
-        # Next column / row
+        # ---- move to next column / row ----
         col_index += 1
         if col_index == cols:
             col_index = 0
-            y -= card_height + 10
+            y_top_row -= card_height + 10
 
     c.save()
 
